@@ -95,7 +95,7 @@ class RobustBaseLLMController(ABC):
 
 
 class RobustOpenAIController(RobustBaseLLMController):
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, seed: Optional[int] = None):
         try:
             from openai import OpenAI
         except ImportError:
@@ -106,6 +106,7 @@ class RobustOpenAIController(RobustBaseLLMController):
         if api_key is None:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
         self.client = OpenAI(api_key=api_key)
+        self.seed = seed
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -117,6 +118,7 @@ class RobustOpenAIController(RobustBaseLLMController):
             ],
             temperature=temperature,
             max_tokens=1000,
+            **({"seed": self.seed} if self.seed is not None else {}),
         )
         return response.choices[0].message.content
 
@@ -124,8 +126,9 @@ class RobustOpenAIController(RobustBaseLLMController):
 class RobustOllamaController(RobustBaseLLMController):
     """Direct Ollama library controller (no LiteLLM proxy)."""
 
-    def __init__(self, model: str = "llama2"):
+    def __init__(self, model: str = "llama2", seed: Optional[int] = None):
         self.model = model
+        self.seed = seed
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -139,7 +142,7 @@ class RobustOllamaController(RobustBaseLLMController):
                 {"role": "system", "content": self.SYSTEM_MESSAGE},
                 {"role": "user", "content": prompt}
             ],
-            options={"temperature": temperature},
+            options={"temperature": temperature, **({"seed": self.seed} if self.seed is not None else {})},
         )
         return response["message"]["content"]
 
@@ -178,11 +181,13 @@ class RobustVLLMController(RobustBaseLLMController):
 
     def __init__(self, model: str = "llama2",
                  vllm_host: str = "http://localhost",
-                 vllm_port: int = 30000):
+                 vllm_port: int = 30000,
+                 seed: Optional[int] = None):
         import requests as _requests
         self._requests = _requests
         self.model = model
         self.base_url = f"{vllm_host}:{vllm_port}"
+        self.seed = seed
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -195,6 +200,8 @@ class RobustVLLMController(RobustBaseLLMController):
             "temperature": temperature,
             "max_tokens": 1000,
         }
+        if self.seed is not None:
+            payload["seed"] = self.seed
         response = self._requests.post(
             f"{self.base_url}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
@@ -250,15 +257,18 @@ class RobustLLMController:
                  api_base: Optional[str] = None,
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
-                 check_connection: bool = False):
+                 check_connection: bool = False,
+                 seed: Optional[int] = None):
+        # seed: sent with every request where the backend supports it (openai-compatible APIs, vLLM, Ollama);
+        # the SGLang controller does not send one
         if backend == "openai":
-            self.llm = RobustOpenAIController(model, api_key)
+            self.llm = RobustOpenAIController(model, api_key, seed=seed)
         elif backend == "ollama":
-            self.llm = RobustOllamaController(model)
+            self.llm = RobustOllamaController(model, seed=seed)
         elif backend == "sglang":
             self.llm = RobustSGLangController(model, sglang_host, sglang_port)
         elif backend == "vllm":
-            self.llm = RobustVLLMController(model, sglang_host, sglang_port)
+            self.llm = RobustVLLMController(model, sglang_host, sglang_port, seed=seed)
         else:
             raise ValueError("Backend must be 'openai', 'ollama', 'sglang', or 'vllm'")
 
@@ -374,7 +384,8 @@ class RobustAgenticMemorySystem:
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
                  check_connection: bool = False,
-                 refresh_index: bool = False):
+                 refresh_index: bool = False,
+                 seed: Optional[int] = None):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
@@ -383,7 +394,7 @@ class RobustAgenticMemorySystem:
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
-            sglang_host, sglang_port, check_connection,
+            sglang_host, sglang_port, check_connection, seed=seed,
         )
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold

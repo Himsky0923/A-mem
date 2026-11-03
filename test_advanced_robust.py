@@ -57,7 +57,7 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False):
+                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -65,6 +65,7 @@ class RobustAdvancedMemAgent:
             sglang_host=sglang_host,
             sglang_port=sglang_port,
             refresh_index=refresh_index,
+            seed=seed,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -72,6 +73,7 @@ class RobustAdvancedMemAgent:
             api_key=None,
             sglang_host=sglang_host,
             sglang_port=sglang_port,
+            seed=seed,
         )
         self.retrieve_k = retrieve_k
         self.temperature_c5 = temperature_c5
@@ -264,6 +266,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Run tag: {run_tag}; results -> {output_path}; log -> {log_path}")
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
+    random.seed(seed)
+    np.random.seed(seed)
+    eval_logger.info(f"Seed {seed}: Python random, numpy, the category-5 option order and every LLM request "
+                     f"(where the backend supports a seed)")
     FAILURES.clear()
 
     samples = load_locomo_dataset(dataset_path)
@@ -297,7 +303,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     def load_or_build(sample_idx, sample):
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port, refresh_index)
+                                       sglang_host, sglang_port, refresh_index, seed=seed)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -496,7 +502,9 @@ def main():
                         help="Score category 5 against the adversarial answer, as the paper's evaluation did "
                              "(default: against 'Not mentioned in the conversation', the correct response)")
     parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for the order of the two category-5 answer options")
+                        help="Random seed: Python random, numpy, the order of the two category-5 answer options, "
+                             "the seed sent with each LLM request (vLLM, Ollama, OpenAI-compatible APIs) and the "
+                             "memory cache name, so each seed builds its own memories")
     parser.add_argument("--refresh_index", action="store_true",
                         help="Re-embed neighbour memories as soon as evolution updates them (default: their "
                              "embeddings refresh only every evo_threshold evolutions, as in the paper). Builds "
