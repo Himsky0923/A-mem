@@ -8,6 +8,10 @@ from pathlib import Path
 # The correct response to a category-5 (adversarial) question: the conversation does not contain the answer.
 NOT_MENTIONED = "Not mentioned in the conversation"
 
+# LoCoMo category ids. Checked against the data (category 1 cites several evidence turns, 2 asks "when",
+# 4 cites one turn, 5 has an adversarial answer), the README and the column order of the paper's Table 1.
+CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop", 5: "adversarial"}
+
 @dataclass
 class QA:
     question: str

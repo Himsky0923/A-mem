@@ -21,7 +21,7 @@ import logging
 from typing import List, Dict, Optional
 from pathlib import Path
 import numpy as np
-from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation
+from load_dataset import load_locomo_dataset, QA, Turn, Session, Conversation, CATEGORY_NAMES
 import nltk
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import pytorch_cos_sim
@@ -184,6 +184,24 @@ def pool_memories(agents: List[RobustAdvancedMemAgent]) -> RobustAdvancedMemAgen
     return pooled
 
 
+def category_label(split_name: str) -> str:
+    """'category_1' -> 'category_1 (multi_hop)'; other split names unchanged."""
+    if split_name.startswith("category_"):
+        cat = int(split_name.split("_")[1])
+        return f"{split_name} ({CATEGORY_NAMES.get(cat, 'unknown')})"
+    return split_name
+
+
+def summarize(aggregate: Dict, metrics=("f1", "bleu1")) -> Dict:
+    """Mean of the headline metrics per category name (and overall), plus question counts."""
+    summary = {}
+    for split_name, split in aggregate.items():
+        name = "overall" if split_name == "overall" else CATEGORY_NAMES.get(int(split_name.split("_")[1]), split_name)
+        summary[name] = {m: split[m]["mean"] for m in metrics if m in split}
+        summary[name]["count"] = split[metrics[0]]["count"] if metrics[0] in split else 0
+    return summary
+
+
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Set up logging configuration."""
     eval_logger = logging.getLogger('locomo_eval_robust')
@@ -207,7 +225,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      temperature_c5: float = 0.5, retrieve_k: int = 10,
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
                      legacy_c5_reference: bool = False, seed: int = 42,
-                     refresh_index: bool = False, memory_scope: str = "conversation"):
+                     refresh_index: bool = False, memory_scope: str = "conversation",
+                     categories=(1, 2, 3, 4, 5)):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{memory_scope}_{timestamp}.log"
@@ -240,7 +259,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "cached_memories_robust_{}_{}{}".format(backend, model, "_refresh" if refresh_index else ""),
     )
     os.makedirs(memories_dir, exist_ok=True)
-    allow_categories = [1, 2, 3, 4, 5]
+    allow_categories = sorted(set(int(c) for c in categories))
+    eval_logger.info("Evaluating categories: " + ", ".join(f"{c} ({CATEGORY_NAMES[c]})" for c in allow_categories))
     cached_samples, stale_cache_samples = [], []
 
     def load_or_build(sample_idx, sample):
@@ -352,6 +372,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "category_distribution": {
             str(cat): count for cat, count in category_counts.items()
         },
+        "categories": allow_categories,
+        "category_names": {str(c): n for c, n in CATEGORY_NAMES.items()},
+        # mean F1 / BLEU-1 per category name; the full statistics are in aggregate_metrics
+        "summary": summarize(aggregate_results),
         "aggregate_metrics": aggregate_results,
         "ratio": ratio,
         "seed": seed,
@@ -378,11 +402,12 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Total questions evaluated: {total_questions}")
     eval_logger.info("Category Distribution:")
     for category, count in sorted(category_counts.items()):
-        eval_logger.info(f"Category {category}: {count} questions ({count/total_questions*100:.1f}%)")
+        eval_logger.info(f"Category {category} ({CATEGORY_NAMES.get(category, 'unknown')}): "
+                         f"{count} questions ({count/total_questions*100:.1f}%)")
 
     eval_logger.info("Aggregate Metrics:")
     for split_name, metrics in aggregate_results.items():
-        eval_logger.info(f"{split_name.replace('_', ' ').title()}:")
+        eval_logger.info(f"{category_label(split_name)}:")
         for metric_name, stats in metrics.items():
             eval_logger.info(f"  {metric_name}:")
             for stat_name, value in stats.items():
@@ -427,7 +452,14 @@ def main():
                              "(LoCoMo's protocol, as in the paper). pooled: from one memory holding all "
                              "evaluated conversations, so retrieval must also reject other conversations' "
                              "notes (uses the same memory caches)")
+    parser.add_argument("--categories", type=str, default="1,2,3,4,5",
+                        help="Comma-separated LoCoMo categories to evaluate: 1 multi-hop, 2 temporal, "
+                             "3 open-domain, 4 single-hop, 5 adversarial (default: all)")
     args = parser.parse_args()
+
+    categories = [int(c) for c in args.categories.split(",") if c.strip()]
+    if not categories or any(c not in CATEGORY_NAMES for c in categories):
+        raise ValueError(f"--categories must be a comma-separated subset of {sorted(CATEGORY_NAMES)}")
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
@@ -436,10 +468,12 @@ def main():
     output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
 
     evaluate_dataset(
-        dataset_path, args.model, output_path, args.ratio,
-        args.backend, args.temperature_c5, args.retrieve_k,
-        args.sglang_host, args.sglang_port, args.legacy_c5_reference, args.seed,
-        args.refresh_index, args.memory_scope,
+        dataset_path, args.model, output_path, ratio=args.ratio,
+        backend=args.backend, temperature_c5=args.temperature_c5, retrieve_k=args.retrieve_k,
+        sglang_host=args.sglang_host, sglang_port=args.sglang_port,
+        legacy_c5_reference=args.legacy_c5_reference, seed=args.seed,
+        refresh_index=args.refresh_index, memory_scope=args.memory_scope,
+        categories=categories,
     )
 
 
