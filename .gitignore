@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Run outputs (rebuilt by the scripts)
+logs/
+results/
+results_k_sweep/
+cached_memories*/
+
+# Secrets
+.env
