@@ -58,7 +58,7 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None):
+                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None, num_ctx=None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -67,6 +67,7 @@ class RobustAdvancedMemAgent:
             sglang_port=sglang_port,
             refresh_index=refresh_index,
             seed=seed,
+            num_ctx=num_ctx,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -75,6 +76,7 @@ class RobustAdvancedMemAgent:
             sglang_host=sglang_host,
             sglang_port=sglang_port,
             seed=seed,
+            num_ctx=num_ctx,
         )
         self.retrieve_k = retrieve_k
         self.temperature_c5 = temperature_c5
@@ -235,6 +237,7 @@ def backend_settings(agent: "RobustAdvancedMemAgent", backend: str) -> Dict:
         info["base_url"] = str(llm.client.base_url)
     elif backend == "ollama":
         info["base_url"] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        info["context_length"] = llm.num_ctx
     elif hasattr(llm, "base_url"):
         info["base_url"] = llm.base_url
     if backend == "vllm":
@@ -273,7 +276,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
                      legacy_c5_reference: bool = False, seed: int = 42,
                      refresh_index: bool = False, memory_scope: str = "conversation",
-                     categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False):
+                     categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False,
+                     num_ctx: int = 8192):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = (f"eval_robust_{safe_name(model)}_{backend}_{safe_name(run_tag)}_ratio{ratio}_{memory_scope}"
@@ -328,7 +332,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     def load_or_build(sample_idx, sample):
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port, refresh_index, seed=seed)
+                                       sglang_host, sglang_port, refresh_index, seed=seed, num_ctx=num_ctx)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -455,6 +459,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "max_tokens": 1000, "retrieve_k": retrieve_k, "seed": seed, "ratio": ratio,
         "categories": allow_categories, "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index, "memory_scope": memory_scope, "run_tag": run_tag,
+        "num_ctx": num_ctx if backend == "ollama" else None,
     }
     main_c5, other_c5_name = ("legacy", "not_mentioned") if legacy_c5_reference else ("not_mentioned", "legacy")
     aggregate_by_c5 = {main_c5: aggregate_results,
@@ -575,6 +580,9 @@ def main():
                         help="Name of this run. Part of the memory cache directory (with backend, model, evolution "
                              "setting and seed) and of the default output results/{model}_{backend}_{run_tag}.json. "
                              "Runs that should share memories (e.g. a k-sweep) use the same tag and seed")
+    parser.add_argument("--num_ctx", type=int, default=8192,
+                        help="Ollama only: context window sent as options.num_ctx (Ollama's default is smaller and "
+                             "it truncates longer prompts silently). vLLM uses its --max-model-len instead")
     parser.add_argument("--rebuild_memory", action="store_true",
                         help="Build the memories again and overwrite this configuration's cache")
     args = parser.parse_args()
@@ -596,6 +604,7 @@ def main():
         legacy_c5_reference=args.legacy_c5_reference, seed=args.seed,
         refresh_index=args.refresh_index, memory_scope=args.memory_scope,
         categories=categories, run_tag=args.run_tag, rebuild_memory=args.rebuild_memory,
+        num_ctx=args.num_ctx,
     )
 
 

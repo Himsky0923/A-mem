@@ -162,9 +162,11 @@ class RobustOpenAIController(RobustBaseLLMController):
 class RobustOllamaController(RobustBaseLLMController):
     """Direct Ollama library controller (no LiteLLM proxy)."""
 
-    def __init__(self, model: str = "llama2", seed: Optional[int] = None):
+    def __init__(self, model: str = "llama2", seed: Optional[int] = None, num_ctx: Optional[int] = None):
         self.model = model
         self.seed = seed
+        # context window; Ollama's own default is small and it silently truncates longer prompts
+        self.num_ctx = num_ctx
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
@@ -179,7 +181,9 @@ class RobustOllamaController(RobustBaseLLMController):
                 {"role": "system", "content": self.SYSTEM_MESSAGE},
                 {"role": "user", "content": prompt}
             ],
-            options={"temperature": temperature, **({"seed": self.seed} if self.seed is not None else {})},
+            options={"temperature": temperature,
+                     **({"seed": self.seed} if self.seed is not None else {}),
+                     **({"num_ctx": self.num_ctx} if self.num_ctx else {})},
         )
         record_usage(response.get("prompt_eval_count"), response.get("eval_count"))
         return response["message"]["content"]
@@ -307,13 +311,15 @@ class RobustLLMController:
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000,
                  check_connection: bool = False,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None,
+                 num_ctx: Optional[int] = None):
+        # num_ctx: Ollama context window (other backends ignore it)
         # seed: sent with every request where the backend supports it (openai-compatible APIs, vLLM, Ollama);
         # the SGLang controller does not send one
         if backend == "openai":
             self.llm = RobustOpenAIController(model, api_key, seed=seed)
         elif backend == "ollama":
-            self.llm = RobustOllamaController(model, seed=seed)
+            self.llm = RobustOllamaController(model, seed=seed, num_ctx=num_ctx)
         elif backend == "sglang":
             self.llm = RobustSGLangController(model, sglang_host, sglang_port)
         elif backend == "vllm":
@@ -435,7 +441,8 @@ class RobustAgenticMemorySystem:
                  sglang_port: int = 30000,
                  check_connection: bool = False,
                  refresh_index: bool = False,
-                 seed: Optional[int] = None):
+                 seed: Optional[int] = None,
+                 num_ctx: Optional[int] = None):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
@@ -444,7 +451,7 @@ class RobustAgenticMemorySystem:
         self.retriever = SimpleEmbeddingRetriever(model_name)
         self.llm_controller = RobustLLMController(
             llm_backend, llm_model, api_key, api_base,
-            sglang_host, sglang_port, check_connection, seed=seed,
+            sglang_host, sglang_port, check_connection, seed=seed, num_ctx=num_ctx,
         )
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
