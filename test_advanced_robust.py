@@ -7,7 +7,7 @@ Usage:
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
 
-from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem
+from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, set_usage_phase
 from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
     parse_plain_text_answer,
@@ -17,6 +17,7 @@ from llm_text_parsers import (
 import os
 import re
 import json
+import time
 import argparse
 import logging
 from typing import List, Dict, Optional
@@ -226,6 +227,27 @@ def default_output_path(model: str, backend: str, run_tag: str) -> str:
     return os.path.join(REPO_DIR, "results", f"{safe_name(model)}_{backend}_{safe_name(run_tag)}.json")
 
 
+def backend_settings(agent: "RobustAdvancedMemAgent", backend: str) -> Dict:
+    """Where requests go and the server's context length, if it reports one."""
+    llm = agent.memory_system.llm_controller.llm
+    info = {"base_url": None, "context_length": None}
+    if hasattr(llm, "client"):  # openai-compatible API
+        info["base_url"] = str(llm.client.base_url)
+    elif backend == "ollama":
+        info["base_url"] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    elif hasattr(llm, "base_url"):
+        info["base_url"] = llm.base_url
+    if backend == "vllm":
+        try:
+            import requests
+            models = requests.get(f"{llm.base_url}/v1/models", timeout=10).json().get("data", [])
+            info["context_length"] = next((m.get("max_model_len") for m in models if m.get("id") == llm.model),
+                                          models[0].get("max_model_len") if models else None)
+        except Exception as e:  # the run does not depend on it
+            logger.warning("Could not read max_model_len from the vLLM server: %s", e)
+    return info
+
+
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Set up logging configuration."""
     eval_logger = logging.getLogger('locomo_eval_robust')
@@ -271,6 +293,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Seed {seed}: Python random, numpy, the category-5 option order and every LLM request "
                      f"(where the backend supports a seed)")
     FAILURES.clear()
+    USAGE.clear()
+    # wall-clock seconds per phase; construction only counts memories built in this run (not loaded from cache)
+    phase_seconds = {"construction": 0.0, "qa": 0.0}
 
     samples = load_locomo_dataset(dataset_path)
     eval_logger.info(f"Loaded {len(samples)} samples")
@@ -333,6 +358,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         else:
             eval_logger.info(f"Building memories for sample {sample_idx} (no cache or --rebuild_memory).")
             built_samples.append(sample_idx)
+            set_usage_phase("construction")
+            started = time.perf_counter()
 
             for _, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
@@ -345,6 +372,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
             mark_cache(memory_cache_file)
+            phase_seconds["construction"] += time.perf_counter() - started
             eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
         return agent
 
@@ -359,6 +387,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         agent = pooled_agent if memory_scope == "pooled" else load_or_build(sample_idx, sample)
 
         eval_logger.info(f"Processing sample {sample_idx + 1}/{len(samples)}")
+        set_usage_phase("qa")
+        started = time.perf_counter()
 
         for qa_idx, qa in enumerate(sample.qa):
             if int(qa.category) in allow_categories:
@@ -406,8 +436,26 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
                 if total_questions % 10 == 0:
                     eval_logger.info(f"Processed {total_questions} questions")
+        phase_seconds["qa"] += time.perf_counter() - started
+        settings_agent = agent
 
     aggregate_results = aggregate_metrics(all_metrics, all_categories)
+    cost = {}
+    for phase in ("construction", "qa"):
+        usage = USAGE.get(phase, {})
+        cost[phase] = {key: int(usage.get(key, 0)) for key in
+                       ("calls", "attempts", "prompt_tokens", "completion_tokens", "max_prompt_tokens", "usage_missing")}
+        cost[phase]["seconds"] = round(phase_seconds[phase], 1)
+    cost["qa"]["questions"] = total_questions
+    cost["construction"]["samples_built"] = len(built_samples)
+    settings = {
+        "model": model, "backend": backend, **backend_settings(settings_agent, backend),
+        # temperatures and limits hard-coded in memory_layer_robust / answer_question
+        "temperature": 0.7, "temperature_c5": temperature_c5, "temperature_keyword_retry": 0.3,
+        "max_tokens": 1000, "retrieve_k": retrieve_k, "seed": seed, "ratio": ratio,
+        "categories": allow_categories, "legacy_c5_reference": legacy_c5_reference,
+        "refresh_index": refresh_index, "memory_scope": memory_scope, "run_tag": run_tag,
+    }
     main_c5, other_c5_name = ("legacy", "not_mentioned") if legacy_c5_reference else ("not_mentioned", "legacy")
     aggregate_by_c5 = {main_c5: aggregate_results,
                        other_c5_name: aggregate_metrics(all_metrics_other_c5, all_categories)}
@@ -435,6 +483,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "refresh_index": refresh_index,
         "memory_scope": memory_scope,
         "run_tag": run_tag,
+        "settings": settings,
+        # LLM calls, tokens and wall-clock time; construction is empty for memories loaded from the cache
+        "cost": cost,
         "memory_cache_dir": memories_dir,
         "rebuild_memory": rebuild_memory,
         "built_samples": built_samples,
@@ -448,6 +499,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     }
     eval_logger.info(f"Error number: {error_num}")
     eval_logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
+    eval_logger.info(f"Settings: {settings}")
+    for phase, c in cost.items():
+        eval_logger.info(f"Cost ({phase}): {c}")
 
     if output_path:
         with open(output_path, 'w') as f:

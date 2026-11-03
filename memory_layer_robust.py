@@ -11,6 +11,7 @@ Key differences from the original:
 """
 
 from typing import List, Dict, Optional, Literal, Any
+from collections import Counter
 import json
 import re
 import uuid
@@ -36,6 +37,38 @@ from llm_text_parsers import (
 )
 
 logger = logging.getLogger("amem_robust")
+
+# ---------------------------------------------------------------------------
+# Usage accounting: LLM calls and tokens, split by phase ("construction" while memories are built, "qa" while
+# questions are answered). The evaluation script sets the phase and saves USAGE in the results.
+# ---------------------------------------------------------------------------
+
+USAGE = {}
+_USAGE_PHASE = ["other"]
+
+
+def set_usage_phase(phase: str):
+    _USAGE_PHASE[0] = phase
+
+
+def _usage() -> Counter:
+    return USAGE.setdefault(_USAGE_PHASE[0], Counter())
+
+
+def count_attempt():
+    """One request sent to the backend (retries included)."""
+    _usage()["attempts"] += 1
+
+
+def record_usage(prompt_tokens, completion_tokens):
+    """Token counts of one successful request; None when the backend did not report them."""
+    u = _usage()
+    if prompt_tokens is None or completion_tokens is None:
+        u["usage_missing"] += 1
+        return
+    u["prompt_tokens"] += int(prompt_tokens)
+    u["completion_tokens"] += int(completion_tokens)
+    u["max_prompt_tokens"] = max(u["max_prompt_tokens"], int(prompt_tokens))
 
 # ---------------------------------------------------------------------------
 # Retry decorator
@@ -110,6 +143,7 @@ class RobustOpenAIController(RobustBaseLLMController):
 
     @retry_llm_call(max_retries=2)
     def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
+        count_attempt()
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -120,6 +154,8 @@ class RobustOpenAIController(RobustBaseLLMController):
             max_tokens=1000,
             **({"seed": self.seed} if self.seed is not None else {}),
         )
+        usage = getattr(response, "usage", None)
+        record_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
         return response.choices[0].message.content
 
 
@@ -136,6 +172,7 @@ class RobustOllamaController(RobustBaseLLMController):
             from ollama import chat
         except ImportError:
             raise ImportError("ollama package not found. Install it with: pip install ollama")
+        count_attempt()
         response = chat(
             model=self.model,
             messages=[
@@ -144,6 +181,7 @@ class RobustOllamaController(RobustBaseLLMController):
             ],
             options={"temperature": temperature, **({"seed": self.seed} if self.seed is not None else {})},
         )
+        record_usage(response.get("prompt_eval_count"), response.get("eval_count"))
         return response["message"]["content"]
 
 
@@ -165,6 +203,7 @@ class RobustSGLangController(RobustBaseLLMController):
                 "max_new_tokens": 1000,
             }
         }
+        count_attempt()
         response = self._requests.post(
             f"{self.base_url}/generate",
             headers={"Content-Type": "application/json"},
@@ -172,7 +211,10 @@ class RobustSGLangController(RobustBaseLLMController):
             timeout=60,
         )
         if response.status_code == 200:
-            return response.json().get("text", "")
+            result = response.json()
+            meta = result.get("meta_info") or {}
+            record_usage(meta.get("prompt_tokens"), meta.get("completion_tokens"))
+            return result.get("text", "")
         raise RuntimeError(f"SGLang server returned status {response.status_code}: {response.text}")
 
 
@@ -202,6 +244,7 @@ class RobustVLLMController(RobustBaseLLMController):
         }
         if self.seed is not None:
             payload["seed"] = self.seed
+        count_attempt()
         response = self._requests.post(
             f"{self.base_url}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
@@ -209,7 +252,10 @@ class RobustVLLMController(RobustBaseLLMController):
             timeout=120,
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            result = response.json()
+            usage = result.get("usage") or {}
+            record_usage(usage.get("prompt_tokens"), usage.get("completion_tokens"))
+            return result["choices"][0]["message"]["content"]
         raise RuntimeError(f"vLLM server returned status {response.status_code}: {response.text}")
 
 
@@ -239,7 +285,10 @@ class RobustLiteLLMController(RobustBaseLLMController):
         if self.api_key:
             completion_args["api_key"] = self.api_key
 
+        count_attempt()
         response = self._completion(**completion_args)
+        usage = getattr(response, "usage", None)
+        record_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
         return response.choices[0].message.content
 
 
@@ -277,6 +326,7 @@ class RobustLLMController:
         call = self.llm.get_completion
 
         def counted(prompt: str, temperature: float = 0.7) -> str:
+            _usage()["calls"] += 1  # one logical call; failed attempts and retries are in "attempts"
             out = call(prompt, temperature=temperature)
             if not out or not str(out).strip():
                 FAILURES["empty_completion"] += 1
