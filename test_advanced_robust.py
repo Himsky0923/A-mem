@@ -248,6 +248,9 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
     results = []
     all_metrics = []
+    # the same predictions with category 5 scored the other way (see --legacy_c5_reference), so every run
+    # reports both the paper's scoring and the corrected one
+    all_metrics_other_c5 = []
     all_categories = []
     total_questions = 0
     category_counts = defaultdict(int)
@@ -337,6 +340,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 prediction = parse_plain_text_answer(prediction)
 
                 reference, metrics = score_prediction(prediction, qa, legacy_c5_reference)
+                other_c5 = None
+                if qa.category == 5:
+                    other_reference, other_metrics = score_prediction(prediction, qa, not legacy_c5_reference)
+                    other_c5 = {"reference": other_reference, "metrics": other_metrics}
+                all_metrics_other_c5.append(other_c5["metrics"] if other_c5 else metrics)
 
                 eval_logger.info(f"Question {total_questions}: {qa.question}")
                 eval_logger.info(f"Prediction: {prediction}")
@@ -357,12 +365,17 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                     "adversarial_answer": qa.adversarial_answer,
                     "metrics": metrics,
                 }
+                if other_c5:
+                    result["other_c5_scoring"] = other_c5
                 results.append(result)
 
                 if total_questions % 10 == 0:
                     eval_logger.info(f"Processed {total_questions} questions")
 
     aggregate_results = aggregate_metrics(all_metrics, all_categories)
+    main_c5, other_c5_name = ("legacy", "not_mentioned") if legacy_c5_reference else ("not_mentioned", "legacy")
+    aggregate_by_c5 = {main_c5: aggregate_results,
+                       other_c5_name: aggregate_metrics(all_metrics_other_c5, all_categories)}
 
     final_results = {
         "model": model,
@@ -377,6 +390,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         # mean F1 / BLEU-1 per category name; the full statistics are in aggregate_metrics
         "summary": summarize(aggregate_results),
         "aggregate_metrics": aggregate_results,
+        # category 5 scored against the adversarial answer as in the paper ("legacy") and against
+        # "Not mentioned in the conversation" ("not_mentioned"); other categories are identical in both
+        "summary_by_c5_scoring": {k: summarize(v) for k, v in aggregate_by_c5.items()},
+        "aggregate_metrics_by_c5_scoring": aggregate_by_c5,
         "ratio": ratio,
         "seed": seed,
         "legacy_c5_reference": legacy_c5_reference,
@@ -412,6 +429,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             eval_logger.info(f"  {metric_name}:")
             for stat_name, value in stats.items():
                 eval_logger.info(f"    {stat_name}: {value:.4f}")
+
+    for scoring, summary in final_results["summary_by_c5_scoring"].items():
+        eval_logger.info(f"Mean F1 / BLEU-1 with category 5 scored '{scoring}': " + "; ".join(
+            f"{name} {s.get('f1', 0):.4f} / {s.get('bleu1', 0):.4f} (n={s['count']})" for name, s in summary.items()))
 
     return final_results
 
