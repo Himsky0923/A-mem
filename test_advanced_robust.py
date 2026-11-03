@@ -58,7 +58,8 @@ class RobustAdvancedMemAgent:
     """Agent using the robust memory system with plain-text LLM calls."""
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
-                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None, num_ctx=None):
+                 sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None, num_ctx=None,
+                 retrieve_k_by_category: Optional[Dict[int, int]] = None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -79,6 +80,8 @@ class RobustAdvancedMemAgent:
             num_ctx=num_ctx,
         )
         self.retrieve_k = retrieve_k
+        # category -> k (the paper tunes k per category, Table 8); categories not in it use retrieve_k
+        self.retrieve_k_by_category = retrieve_k_by_category or {}
         self.temperature_c5 = temperature_c5
 
     def add_memory(self, content, time=None):
@@ -119,10 +122,9 @@ Keywords:"""
                         rng: Optional[random.Random] = None) -> tuple:
         """Generate answer for a question — plain text, no JSON schema."""
         keywords = self.generate_query_llm(question)
-        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
-        context = raw_context
-
         assert category in [1, 2, 3, 4, 5]
+        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k_by_category.get(category, self.retrieve_k))
+        context = raw_context
 
         if category == 5:
             answer_tmp = list()
@@ -277,7 +279,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      legacy_c5_reference: bool = False, seed: int = 42,
                      refresh_index: bool = False, memory_scope: str = "conversation",
                      categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False,
-                     num_ctx: int = 8192):
+                     num_ctx: int = 8192, retrieve_k_by_category: Optional[Dict[int, int]] = None):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = (f"eval_robust_{safe_name(model)}_{backend}_{safe_name(run_tag)}_ratio{ratio}_{memory_scope}"
@@ -332,7 +334,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     def load_or_build(sample_idx, sample):
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
-                                       sglang_host, sglang_port, refresh_index, seed=seed, num_ctx=num_ctx)
+                                       sglang_host, sglang_port, refresh_index, seed=seed, num_ctx=num_ctx,
+                                       retrieve_k_by_category=retrieve_k_by_category)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -457,6 +460,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         # temperatures and limits hard-coded in memory_layer_robust / answer_question
         "temperature": 0.7, "temperature_c5": temperature_c5, "temperature_keyword_retry": 0.3,
         "max_tokens": 1000, "retrieve_k": retrieve_k, "seed": seed, "ratio": ratio,
+        "retrieve_k_by_category": ({str(c): k for c, k in retrieve_k_by_category.items()}
+                                   if retrieve_k_by_category else None),
         "categories": allow_categories, "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index, "memory_scope": memory_scope, "run_tag": run_tag,
         "num_ctx": num_ctx if backend == "ollama" else None,
@@ -553,6 +558,9 @@ def main():
                         help="Temperature for category 5 questions")
     parser.add_argument("--retrieve_k", type=int, default=10,
                         help="Number of memories to retrieve")
+    parser.add_argument("--retrieve_k_per_category", type=str, default=None,
+                        help="Five comma-separated k values for categories 1-5 (e.g. 10,10,50,10,10, the paper's "
+                             "Table 8 for Qwen2.5-3B); overrides --retrieve_k per question")
     parser.add_argument("--sglang_host", type=str, default="http://localhost",
                         help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
@@ -590,6 +598,12 @@ def main():
     categories = [int(c) for c in args.categories.split(",") if c.strip()]
     if not categories or any(c not in CATEGORY_NAMES for c in categories):
         raise ValueError(f"--categories must be a comma-separated subset of {sorted(CATEGORY_NAMES)}")
+    retrieve_k_by_category = None
+    if args.retrieve_k_per_category:
+        ks = [int(k) for k in args.retrieve_k_per_category.split(",")]
+        if len(ks) != 5 or min(ks) < 1:
+            raise ValueError("--retrieve_k_per_category needs five positive values, for categories 1-5")
+        retrieve_k_by_category = dict(zip(range(1, 6), ks))
 
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
@@ -604,7 +618,7 @@ def main():
         legacy_c5_reference=args.legacy_c5_reference, seed=args.seed,
         refresh_index=args.refresh_index, memory_scope=args.memory_scope,
         categories=categories, run_tag=args.run_tag, rebuild_memory=args.rebuild_memory,
-        num_ctx=args.num_ctx,
+        num_ctx=args.num_ctx, retrieve_k_by_category=retrieve_k_by_category,
     )
 
 
