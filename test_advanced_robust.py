@@ -15,6 +15,7 @@ from llm_text_parsers import (
     parse_keywords_response,
 )
 import os
+import re
 import json
 import argparse
 import logging
@@ -202,6 +203,27 @@ def summarize(aggregate: Dict, metrics=("f1", "bleu1")) -> Dict:
     return summary
 
 
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def safe_name(text: str) -> str:
+    """text usable as one path component on every OS: 'Qwen/Qwen2.5-3B' -> 'Qwen-Qwen2.5-3B', 'qwen2.5:3b' -> 'qwen2.5-3b'."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text)).strip("-") or "none"
+
+
+def memory_cache_dir(backend: str, model: str, run_tag: str, seed: int,
+                     refresh_index: bool = False, evolution: bool = True) -> str:
+    """The memory cache of one configuration. Everything that changes how memory is built is in the name, so a run
+    with other settings never loads these memories by accident."""
+    name = "{}_{}_{}{}_seed{}_{}".format(backend, safe_name(model), "evo" if evolution else "noevo",
+                                         "_refresh" if refresh_index else "", seed, safe_name(run_tag))
+    return os.path.join(REPO_DIR, "cached_memories_robust", name)
+
+
+def default_output_path(model: str, backend: str, run_tag: str) -> str:
+    return os.path.join(REPO_DIR, "results", f"{safe_name(model)}_{backend}_{safe_name(run_tag)}.json")
+
+
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     """Set up logging configuration."""
     eval_logger = logging.getLogger('locomo_eval_robust')
@@ -213,7 +235,8 @@ def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
     eval_logger.addHandler(console_handler)
 
     if log_file:
-        file_handler = logging.FileHandler(log_file)
+        # utf-8: with the locale encoding (e.g. cp950 on Windows) lines holding other characters were dropped
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
         eval_logger.addHandler(file_handler)
 
@@ -226,14 +249,19 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      sglang_host: str = "http://localhost", sglang_port: int = 30000,
                      legacy_c5_reference: bool = False, seed: int = 42,
                      refresh_index: bool = False, memory_scope: str = "conversation",
-                     categories=(1, 2, 3, 4, 5)):
+                     categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    log_filename = f"eval_robust_{model}_{backend}_ratio{ratio}_{memory_scope}_{timestamp}.log"
-    log_path = os.path.join(os.path.dirname(__file__), "logs", log_filename)
+    log_filename = (f"eval_robust_{safe_name(model)}_{backend}_{safe_name(run_tag)}_ratio{ratio}_{memory_scope}"
+                    f"_{timestamp}.log")
+    log_path = os.path.join(REPO_DIR, "logs", log_filename)
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    if output_path is None:
+        output_path = default_output_path(model, backend, run_tag)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     eval_logger = setup_logger(log_path)
+    eval_logger.info(f"Run tag: {run_tag}; results -> {output_path}; log -> {log_path}")
     eval_logger.info(f"Loading dataset from {dataset_path}")
     eval_logger.info(f"Using ROBUST memory layer (no JSON schema dependency)")
     FAILURES.clear()
@@ -257,11 +285,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
     i = 0
     error_num = 0
-    memories_dir = os.path.join(
-        os.path.dirname(__file__),
-        "cached_memories_robust_{}_{}{}".format(backend, model, "_refresh" if refresh_index else ""),
-    )
+    memories_dir = memory_cache_dir(backend, model, run_tag, seed, refresh_index)
     os.makedirs(memories_dir, exist_ok=True)
+    eval_logger.info(f"Memory cache: {memories_dir}" + (" (--rebuild_memory: existing cache ignored and overwritten)"
+                                                        if rebuild_memory else ""))
+    built_samples = []
     allow_categories = sorted(set(int(c) for c in categories))
     eval_logger.info("Evaluating categories: " + ", ".join(f"{c} ({CATEGORY_NAMES[c]})" for c in allow_categories))
     cached_samples, stale_cache_samples = [], []
@@ -277,7 +305,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
         )
 
-        if os.path.exists(memory_cache_file):
+        if os.path.exists(memory_cache_file) and not rebuild_memory:
             eval_logger.info(f"Loading cached memories for sample {sample_idx}")
             with open(memory_cache_file, 'rb') as f:
                 cached_memories = pickle.load(f)
@@ -297,7 +325,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 eval_logger.warning(f"Memories of sample {sample_idx} were cached by another version of the memory "
                                     f"layer; delete {memories_dir} to rebuild them")
         else:
-            eval_logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
+            eval_logger.info(f"Building memories for sample {sample_idx} (no cache or --rebuild_memory).")
+            built_samples.append(sample_idx)
 
             for _, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
@@ -399,6 +428,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index,
         "memory_scope": memory_scope,
+        "run_tag": run_tag,
+        "memory_cache_dir": memories_dir,
+        "rebuild_memory": rebuild_memory,
+        "built_samples": built_samples,
         "pooled_notes": len(pooled_agent.memory_system.memories) if memory_scope == "pooled" else None,
         "cached_samples": cached_samples,
         "stale_cache_samples": stale_cache_samples,
@@ -476,6 +509,12 @@ def main():
     parser.add_argument("--categories", type=str, default="1,2,3,4,5",
                         help="Comma-separated LoCoMo categories to evaluate: 1 multi-hop, 2 temporal, "
                              "3 open-domain, 4 single-hop, 5 adversarial (default: all)")
+    parser.add_argument("--run_tag", type=str, default="default",
+                        help="Name of this run. Part of the memory cache directory (with backend, model, evolution "
+                             "setting and seed) and of the default output results/{model}_{backend}_{run_tag}.json. "
+                             "Runs that should share memories (e.g. a k-sweep) use the same tag and seed")
+    parser.add_argument("--rebuild_memory", action="store_true",
+                        help="Build the memories again and overwrite this configuration's cache")
     args = parser.parse_args()
 
     categories = [int(c) for c in args.categories.split(",") if c.strip()]
@@ -486,7 +525,7 @@ def main():
         raise ValueError("Ratio must be between 0.0 and 1.0")
 
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
-    output_path = os.path.join(os.path.dirname(__file__), args.output) if args.output else None
+    output_path = os.path.join(REPO_DIR, args.output) if args.output else None  # None: default_output_path
 
     evaluate_dataset(
         dataset_path, args.model, output_path, ratio=args.ratio,
@@ -494,7 +533,7 @@ def main():
         sglang_host=args.sglang_host, sglang_port=args.sglang_port,
         legacy_c5_reference=args.legacy_c5_reference, seed=args.seed,
         refresh_index=args.refresh_index, memory_scope=args.memory_scope,
-        categories=categories,
+        categories=categories, run_tag=args.run_tag, rebuild_memory=args.rebuild_memory,
     )
 
 
