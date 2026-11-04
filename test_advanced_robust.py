@@ -59,7 +59,7 @@ class RobustAdvancedMemAgent:
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
                  sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None, num_ctx=None,
-                 retrieve_k_by_category: Optional[Dict[int, int]] = None):
+                 retrieve_k_by_category: Optional[Dict[int, int]] = None, base_url: Optional[str] = None):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -69,11 +69,13 @@ class RobustAdvancedMemAgent:
             refresh_index=refresh_index,
             seed=seed,
             num_ctx=num_ctx,
+            api_base=base_url,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
             model=model,
             api_key=None,
+            api_base=base_url,
             sglang_host=sglang_host,
             sglang_port=sglang_port,
             seed=seed,
@@ -279,7 +281,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      legacy_c5_reference: bool = False, seed: int = 42,
                      refresh_index: bool = False, memory_scope: str = "conversation",
                      categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False,
-                     num_ctx: int = 8192, retrieve_k_by_category: Optional[Dict[int, int]] = None):
+                     num_ctx: int = 8192, retrieve_k_by_category: Optional[Dict[int, int]] = None,
+                     base_url: Optional[str] = None):
     """Evaluate the robust agent on the LoComo dataset."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = (f"eval_robust_{safe_name(model)}_{backend}_{safe_name(run_tag)}_ratio{ratio}_{memory_scope}"
@@ -335,7 +338,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
                                        sglang_host, sglang_port, refresh_index, seed=seed, num_ctx=num_ctx,
-                                       retrieve_k_by_category=retrieve_k_by_category)
+                                       retrieve_k_by_category=retrieve_k_by_category, base_url=base_url)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
@@ -540,7 +543,27 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     return final_results
 
 
+def load_env_file(path: str = os.path.join(REPO_DIR, ".env")):
+    """Set variables from a local .env (KEY=VALUE lines) that are not already set in the environment.
+    Keeps API keys out of the command line and out of git (.env is gitignored)."""
+    if not os.path.exists(path):
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path, override=False)
+        return
+    except ImportError:
+        pass
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip().removeprefix("export "), value.strip().strip("'\""))
+
+
 def main():
+    load_env_file()
     parser = argparse.ArgumentParser(
         description="Evaluate robust text-only agent on LoComo dataset (no JSON schema dependency)"
     )
@@ -561,6 +584,9 @@ def main():
     parser.add_argument("--retrieve_k_per_category", type=str, default=None,
                         help="Five comma-separated k values for categories 1-5 (e.g. 10,10,50,10,10, the paper's "
                              "Table 8 for Qwen2.5-3B); overrides --retrieve_k per question")
+    parser.add_argument("--base_url", type=str, default=None,
+                        help="openai backend: OpenAI-compatible endpoint, e.g. https://api.deepseek.com "
+                             "(default: the OPENAI_BASE_URL environment variable, else api.openai.com)")
     parser.add_argument("--sglang_host", type=str, default="http://localhost",
                         help="SGLang server host (for sglang backend)")
     parser.add_argument("--sglang_port", type=int, default=30000,
@@ -618,7 +644,7 @@ def main():
         legacy_c5_reference=args.legacy_c5_reference, seed=args.seed,
         refresh_index=args.refresh_index, memory_scope=args.memory_scope,
         categories=categories, run_tag=args.run_tag, rebuild_memory=args.rebuild_memory,
-        num_ctx=args.num_ctx, retrieve_k_by_category=retrieve_k_by_category,
+        num_ctx=args.num_ctx, retrieve_k_by_category=retrieve_k_by_category, base_url=args.base_url,
     )
 
 
