@@ -88,6 +88,7 @@ class RobustAdvancedMemAgent:
         # category -> k (the paper tunes k per category, Table 8); categories not in it use retrieve_k
         self.retrieve_k_by_category = retrieve_k_by_category or {}
         self.temperature_c5 = temperature_c5
+        self.last_answer_error = None  # why the last answer call failed (None: it did not)
 
     def add_memory(self, content, time=None):
         self.memory_system.add_note(content, time=time)
@@ -160,6 +161,7 @@ Question: {question} Short answer:"""
 Question: {question} Short answer:"""
             temperature = 0.7
 
+        self.last_answer_error = None
         try:
             response = self.memory_system.llm_controller.llm.get_completion(
                 user_prompt, temperature=temperature,
@@ -167,8 +169,22 @@ Question: {question} Short answer:"""
         except Exception as e:
             logger.warning("answer_question failed: %s — returning empty", e)
             FAILURES["answer"] += 1  # scored as an empty prediction; reported at the end
+            if is_context_overflow(e):
+                # the prompt (retrieved memories plus their linked neighbours) is longer than the server's
+                # context window, e.g. vLLM --max-model-len 8192
+                FAILURES["answer_context_overflow"] += 1
+                self.last_answer_error = "context_overflow"
+            else:
+                self.last_answer_error = f"{type(e).__name__}: {str(e)[:200]}"
             response = ""
         return response, user_prompt, raw_context
+
+
+def is_context_overflow(error: Exception) -> bool:
+    """True if a failed call was rejected for exceeding the model's context window (vLLM / OpenAI-style message:
+    "This model's maximum context length is 8192 tokens ...")."""
+    text = str(error).lower()
+    return "maximum context length" in text or "context_length_exceeded" in text
 
 
 def pool_memories(agents: List[RobustAdvancedMemAgent]) -> RobustAdvancedMemAgent:
@@ -462,6 +478,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 }
                 if other_c5:
                     result["other_c5_scoring"] = other_c5
+                if agent.last_answer_error:  # scored as an empty prediction
+                    result["answer_error"] = agent.last_answer_error
                 results.append(result)
 
                 if total_questions % 10 == 0:
