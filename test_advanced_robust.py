@@ -10,6 +10,7 @@ Usage:
 from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, set_usage_phase
 from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
+    PARSE_FALLBACKS,
     parse_plain_text_answer,
     parse_relevant_parts,
     parse_keywords_response,
@@ -302,6 +303,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Seed {seed}: Python random, numpy, the category-5 option order and every LLM request "
                      f"(where the backend supports a seed)")
     FAILURES.clear()
+    PARSE_FALLBACKS.clear()
     USAGE.clear()
     # wall-clock seconds per phase; construction only counts memories built in this run (not loaded from cache)
     phase_seconds = {"construction": 0.0, "qa": 0.0}
@@ -508,10 +510,13 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         # failures absorbed in this run (memories loaded from the cache were built earlier);
         # "answer" counts questions scored as empty predictions because the call failed
         "llm_failures": dict(FAILURES),
+        # model outputs the parsers could not read and replaced with a default or heuristic (this run only)
+        "parse_fallbacks": dict(PARSE_FALLBACKS),
         "individual_results": results,
     }
     eval_logger.info(f"Error number: {error_num}")
     eval_logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
+    eval_logger.info(f"Parser fallbacks in this run: {dict(PARSE_FALLBACKS) or 'none'}")
     eval_logger.info(f"Settings: {settings}")
     for phase, c in cost.items():
         eval_logger.info(f"Cost ({phase}): {c}")

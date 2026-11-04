@@ -7,9 +7,14 @@ prompts that work with any LLM backend (Ollama, SGLang, OpenAI, etc.).
 import json
 import re
 import logging
+from collections import Counter
 from typing import Dict, List, Any, Optional, Callable
 
 logger = logging.getLogger("amem_robust")
+
+# Times a parser could not read the model's output and used a default or a heuristic instead, by kind. These do
+# not raise, so the evaluation script saves them (parse_fallbacks) to show how much of a run rests on them.
+PARSE_FALLBACKS = Counter()
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -252,6 +257,7 @@ def parse_evolution_decision(response: str) -> Dict[str, str]:
             "STRENGTHEN_AND_UPDATE"
         }
         if decision not in valid_decisions:
+            PARSE_FALLBACKS["decision_inferred_from_text"] += 1
             # Try to infer from keywords
             resp_upper = resp.upper()
             if "STRENGTHEN" in resp_upper and "UPDATE" in resp_upper:
@@ -284,6 +290,7 @@ def parse_evolution_decision(response: str) -> Dict[str, str]:
         result = {"decision": decision, "reason": ""}
 
     if "decision" not in result:
+        PARSE_FALLBACKS["decision_unreadable"] += 1
         result = {"decision": "NO_EVOLUTION", "reason": ""}
 
     return result
@@ -305,7 +312,7 @@ def parse_strengthen_details(response: str) -> Dict[str, Any]:
             try:
                 connections.append(int(item.strip()))
             except (ValueError, TypeError):
-                pass
+                PARSE_FALLBACKS["strengthen_connection_not_int"] += 1
 
         tags = _parse_list_items(tags_text)
         return {"connections": connections, "tags": tags}
@@ -339,6 +346,7 @@ def parse_update_neighbors(response: str, num_neighbors: int) -> List[Dict[str, 
             )
             match = pattern.search(resp)
             if not match:
+                PARSE_FALLBACKS["update_neighbor_block_missing"] += 1
                 neighbors.append({"context": "", "tags": []})
                 continue
 
@@ -451,14 +459,17 @@ def validate_analysis_result(result: Dict[str, Any], content: str = "") -> Dict[
 
     # Repair empty keywords from content
     if not keywords and content:
+        PARSE_FALLBACKS["analysis_heuristic_keywords"] += 1
         keywords = _heuristic_keywords(content)
 
     # Repair empty context from content
     if not context and content:
+        PARSE_FALLBACKS["analysis_heuristic_context"] += 1
         context = _heuristic_context(content)
 
     # Repair empty tags from keywords
     if not tags and keywords:
+        PARSE_FALLBACKS["analysis_tags_from_keywords"] += 1
         tags = keywords[:3]
 
     result["keywords"] = keywords
