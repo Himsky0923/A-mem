@@ -7,7 +7,7 @@ Usage:
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
 
-from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, set_usage_phase
+from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, EVOLUTION, set_usage_phase
 from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
     PARSE_FALLBACKS,
@@ -29,7 +29,7 @@ import nltk
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import pytorch_cos_sim
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 import copy
 import pickle
 import random
@@ -60,7 +60,8 @@ class RobustAdvancedMemAgent:
 
     def __init__(self, model, backend, retrieve_k, temperature_c5,
                  sglang_host="http://localhost", sglang_port=30000, refresh_index=False, seed=None, num_ctx=None,
-                 retrieve_k_by_category: Optional[Dict[int, int]] = None, base_url: Optional[str] = None):
+                 retrieve_k_by_category: Optional[Dict[int, int]] = None, base_url: Optional[str] = None,
+                 evolution: bool = True):
         self.memory_system = RobustAgenticMemorySystem(
             model_name='all-MiniLM-L6-v2',
             llm_backend=backend,
@@ -71,6 +72,7 @@ class RobustAdvancedMemAgent:
             seed=seed,
             num_ctx=num_ctx,
             api_base=base_url,
+            evolution=evolution,
         )
         self.retriever_llm = RobustLLMController(
             backend=backend,
@@ -242,7 +244,7 @@ def backend_settings(agent: "RobustAdvancedMemAgent", backend: str) -> Dict:
         info["base_url"] = str(llm.client.base_url)
     elif backend == "ollama":
         info["base_url"] = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        info["context_length"] = llm.num_ctx
+        info["context_length"] = getattr(llm, "num_ctx", None)
     elif hasattr(llm, "base_url"):
         info["base_url"] = llm.base_url
     if backend == "vllm":
@@ -283,8 +285,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                      refresh_index: bool = False, memory_scope: str = "conversation",
                      categories=(1, 2, 3, 4, 5), run_tag: str = "default", rebuild_memory: bool = False,
                      num_ctx: int = 8192, retrieve_k_by_category: Optional[Dict[int, int]] = None,
-                     base_url: Optional[str] = None):
-    """Evaluate the robust agent on the LoComo dataset."""
+                     base_url: Optional[str] = None, evolution: bool = True):
+    """Evaluate the robust agent on the LoComo dataset. evolution=False is the ablation (--no_evolution)."""
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
     log_filename = (f"eval_robust_{safe_name(model)}_{backend}_{safe_name(run_tag)}_ratio{ratio}_{memory_scope}"
                     f"_{timestamp}.log")
@@ -327,7 +329,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
 
     i = 0
     error_num = 0
-    memories_dir = memory_cache_dir(backend, model, run_tag, seed, refresh_index)
+    memories_dir = memory_cache_dir(backend, model, run_tag, seed, refresh_index, evolution)
+    eval_logger.info(f"Memory evolution: {'ON' if evolution else 'OFF (--no_evolution: existing notes are never updated)'}")
+    # evolution counts of the memories this run uses, built now or read from the cache next to them
+    evolution_stats = Counter()
     os.makedirs(memories_dir, exist_ok=True)
     eval_logger.info(f"Memory cache: {memories_dir}" + (" (--rebuild_memory: existing cache ignored and overwritten)"
                                                         if rebuild_memory else ""))
@@ -340,13 +345,15 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         """An agent holding this conversation's memory, loaded from the cache or built and cached."""
         agent = RobustAdvancedMemAgent(model, backend, retrieve_k, temperature_c5,
                                        sglang_host, sglang_port, refresh_index, seed=seed, num_ctx=num_ctx,
-                                       retrieve_k_by_category=retrieve_k_by_category, base_url=base_url)
+                                       retrieve_k_by_category=retrieve_k_by_category, base_url=base_url,
+                                       evolution=evolution)
 
         memory_cache_file = os.path.join(memories_dir, f"memory_cache_sample_{sample_idx}.pkl")
         retriever_cache_file = os.path.join(memories_dir, f"retriever_cache_sample_{sample_idx}.pkl")
         retriever_cache_embeddings_file = os.path.join(
             memories_dir, f"retriever_cache_embeddings_sample_{sample_idx}.npy"
         )
+        evolution_stats_file = os.path.join(memories_dir, f"evolution_stats_sample_{sample_idx}.json")
 
         if os.path.exists(memory_cache_file) and not rebuild_memory:
             eval_logger.info(f"Loading cached memories for sample {sample_idx}")
@@ -362,6 +369,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 eval_logger.info(f"No retriever cache found, loading from memory")
                 agent.memory_system.consolidate_memories()  # the document format of this memory system
             eval_logger.info(f"Successfully loaded {len(cached_memories)} memories")
+            if os.path.exists(evolution_stats_file):
+                with open(evolution_stats_file) as f:
+                    evolution_stats.update(json.load(f))
+            else:
+                eval_logger.warning(f"No evolution stats cached for sample {sample_idx}")
             cached_samples.append(sample_idx)
             if not cache_is_current(memory_cache_file):
                 stale_cache_samples.append(sample_idx)
@@ -372,6 +384,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             built_samples.append(sample_idx)
             set_usage_phase("construction")
             started = time.perf_counter()
+            evolution_before = Counter(EVOLUTION)
 
             for _, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
@@ -384,6 +397,11 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                 pickle.dump(memories_to_cache, f)
             agent.memory_system.retriever.save(retriever_cache_file, retriever_cache_embeddings_file)
             mark_cache(memory_cache_file)
+            sample_evolution = Counter(EVOLUTION) - evolution_before
+            with open(evolution_stats_file, "w") as f:
+                json.dump(dict(sample_evolution), f)
+            evolution_stats.update(sample_evolution)
+            eval_logger.info(f"Evolution in sample {sample_idx}: {dict(sample_evolution)}")
             phase_seconds["construction"] += time.perf_counter() - started
             eval_logger.info(f"Successfully cached {len(memories_to_cache)} memories")
         return agent
@@ -469,6 +487,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
                                    if retrieve_k_by_category else None),
         "categories": allow_categories, "legacy_c5_reference": legacy_c5_reference,
         "refresh_index": refresh_index, "memory_scope": memory_scope, "run_tag": run_tag,
+        "evolution": evolution,
         "num_ctx": num_ctx if backend == "ollama" else None,
     }
     main_c5, other_c5_name = ("legacy", "not_mentioned") if legacy_c5_reference else ("not_mentioned", "legacy")
@@ -499,6 +518,10 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "memory_scope": memory_scope,
         "run_tag": run_tag,
         "settings": settings,
+        "evolution": evolution,
+        # decisions by type, neighbour-update calls, neighbour notes rewritten (0 with --no_evolution) and updates
+        # skipped by --no_evolution, summed over the memories used (built in this run or read from their cache)
+        "evolution_stats": dict(evolution_stats),
         # LLM calls, tokens and wall-clock time; construction is empty for memories loaded from the cache
         "cost": cost,
         "memory_cache_dir": memories_dir,
@@ -517,6 +540,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     eval_logger.info(f"Error number: {error_num}")
     eval_logger.info(f"LLM failures absorbed in this run: {dict(FAILURES) or 'none'}")
     eval_logger.info(f"Parser fallbacks in this run: {dict(PARSE_FALLBACKS) or 'none'}")
+    eval_logger.info(f"Evolution ({'on' if evolution else 'off'}): {dict(evolution_stats) or 'none'}")
     eval_logger.info(f"Settings: {settings}")
     for phase, c in cost.items():
         eval_logger.info(f"Cost ({phase}): {c}")
@@ -622,6 +646,10 @@ def main():
     parser.add_argument("--num_ctx", type=int, default=8192,
                         help="Ollama only: context window sent as options.num_ctx (Ollama's default is smaller and "
                              "it truncates longer prompts silently). vLLM uses its --max-model-len instead")
+    parser.add_argument("--no_evolution", action="store_true",
+                        help="Ablation: never update existing notes when a note is added (skip the neighbour-update "
+                             "call). Note construction, the evolution decision, linking, retrieval and answering are "
+                             "unchanged. Builds its own memory cache")
     parser.add_argument("--rebuild_memory", action="store_true",
                         help="Build the memories again and overwrite this configuration's cache")
     args = parser.parse_args()
@@ -650,6 +678,7 @@ def main():
         refresh_index=args.refresh_index, memory_scope=args.memory_scope,
         categories=categories, run_tag=args.run_tag, rebuild_memory=args.rebuild_memory,
         num_ctx=args.num_ctx, retrieve_k_by_category=retrieve_k_by_category, base_url=args.base_url,
+        evolution=not args.no_evolution,
     )
 
 

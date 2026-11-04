@@ -47,6 +47,11 @@ USAGE = {}
 _USAGE_PHASE = ["other"]
 
 
+# Memory evolution while notes are added: decisions by type, neighbour-update calls, neighbour notes rewritten,
+# and updates skipped because evolution is off (--no_evolution).
+EVOLUTION = Counter()
+
+
 def set_usage_phase(phase: str):
     _USAGE_PHASE[0] = phase
 
@@ -446,7 +451,8 @@ class RobustAgenticMemorySystem:
                  check_connection: bool = False,
                  refresh_index: bool = False,
                  seed: Optional[int] = None,
-                 num_ctx: Optional[int] = None):
+                 num_ctx: Optional[int] = None,
+                 evolution: bool = True):
 
         self.memories: Dict[str, RobustMemoryNote] = {}
         # re-embed neighbours as soon as evolution updates them; otherwise their embeddings stay
@@ -457,6 +463,9 @@ class RobustAgenticMemorySystem:
             llm_backend, llm_model, api_key, api_base,
             sglang_host, sglang_port, check_connection, seed=seed, num_ctx=num_ctx,
         )
+        # evolution=False (ablation): never rewrite existing notes. The decision call and linking ("strengthen") run
+        # as usual and the return value of process_memory is unchanged, so consolidation happens at the same points
+        self.evolution = evolution
         self.evo_cnt = 0
         self.evo_threshold = evo_threshold
 
@@ -572,6 +581,7 @@ class RobustAgenticMemorySystem:
             decision_response = self.llm_controller.llm.get_completion(decision_prompt)
             decision = parse_evolution_decision(decision_response)
             logger.debug("Evolution decision: %s", decision)
+            EVOLUTION["decision_" + decision["decision"].lower()] += 1
 
             if decision["decision"] == "NO_EVOLUTION":
                 return False, note
@@ -606,7 +616,10 @@ class RobustAgenticMemorySystem:
                     note.tags = strengthen["tags"]
 
             # ---- Call 3: Update neighbors (conditional) ----
-            if should_update:
+            if should_update and not self.evolution:
+                EVOLUTION["neighbor_update_skipped"] += 1  # the ablation: existing notes stay as they are
+            elif should_update:
+                EVOLUTION["neighbor_update_calls"] += 1
                 try:
                     update_prompt = UPDATE_NEIGHBORS_PROMPT.format(
                         content=note.content,
@@ -627,6 +640,8 @@ class RobustAgenticMemorySystem:
                         if memorytmp_idx >= len(noteslist):
                             continue
                         notetmp = noteslist[memorytmp_idx]
+                        if upd["tags"] or upd["context"]:
+                            EVOLUTION["neighbor_notes_updated"] += 1
                         if upd["tags"]:
                             notetmp.tags = upd["tags"]
                         if upd["context"]:
