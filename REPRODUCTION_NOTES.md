@@ -63,6 +63,19 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
    from overflows; the aggregate table lists overflows per condition.
 9. **Dataset statistic.** `load_dataset.py` prints that 1,954 of 1,986 questions have image evidence; its check
    (`dia_id.endswith(turn_id)`) matches far too broadly. Printing only; it does not affect evaluation.
+10. **`deepseek-chat` is an alias.** In Nov 2026 the DeepSeek API lists only `deepseek-flash` and
+    `deepseek-v4-pro`; requests for `deepseek-chat` are answered by `deepseek-flash` (response `model` field,
+    recorded in `settings.served_models`). Report the served model, not the requested name.
+11. **The two models use evolution very differently** (smoke test, first 60 turns of conversation 1, seed 1):
+    Qwen2.5-3B chose UPDATE_NEIGHBOR / STRENGTHEN_AND_UPDATE in 38 of 59 decisions and rewrote 187 neighbour notes;
+    DeepSeek chose STRENGTHEN (links only) in 57 of 59 and rewrote 10. Disabling evolution can therefore only have
+    a small effect on DeepSeek's memories.
+12. **Answer prompts grow with links.** In the same test the longest answer prompt was 2,859 tokens for Qwen
+    (evolution on), 4,376 (off) and 9,564 for DeepSeek, which links far more. Over a full conversation Qwen's
+    prompts will be longer; DeepSeek's context window is large enough that it does not overflow, so the two
+    models do not face the same limit.
+13. **Category-5 scoring flips the adversarial result.** In the smoke test Qwen answered "Not mentioned in the
+    conversation" to both adversarial questions: F1 0 under the paper's scoring, 100 under the corrected one.
 
 ## Debug diary
 
@@ -76,6 +89,7 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
 | vLLM: `fatal error: Python.h: No such file or directory` | Triton compiles a CUDA helper; Ubuntu's Python has no headers | venv on uv-managed CPython 3.12, which ships them |
 | vLLM: `Could not find nvcc` | FlashInfer's sampler JIT-compiles with the CUDA toolkit, absent in WSL | `VLLM_USE_FLASHINFER_SAMPLER=0` (PyTorch sampler) |
 | First vLLM start took ~16 min | Model download (5.8 GB) | Cached afterwards (model loads in seconds) |
+| Not enough VRAM for 3 parallel runs + vLLM | Each evaluation process loads MiniLM and BERTScore's RoBERTa-large on the GPU (~1.8 GB); peak 15.7 / 16 GB | `PARALLEL=2` while vLLM runs |
 | Shell commands fail on `\r` | CRLF line endings on a Windows checkout | `.gitattributes` keeps `*.sh` LF; README strips `\r` from `requirements.txt` |
 
 ## Results

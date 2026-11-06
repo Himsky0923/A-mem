@@ -59,11 +59,19 @@ K=10 bash scripts/run_experiments.sh full       # optional: Qwen baseline on the
 bash scripts/run_experiments.sh aggregate       # results/summary.md + CSVs
 ```
 
-Runs use `--ratio 0.3`: the first 3 of the 10 LoCoMo conversations (1,451 turns, 497 questions). Building the
-memories takes about 3.6 s per turn with evolution and 1.4 s without on Qwen2.5-3B (measured on the GPU above), so
-about 1.5 h and 35 min per trial before answering. `PARALLEL=3` runs three trials at once against the same vLLM
-server. Memories are cached in `cached_memories_robust/` per backend, model, evolution setting, seed and run tag,
-so the k-sweep and later steps reuse them.
+Runs use `--ratio 0.3`: the first 3 of the 10 LoCoMo conversations (1,451 turns, 497 questions). Measured on the
+GPU above with three runs at once: building memories takes about 3.3 s per turn for Qwen with evolution, 1.7 s
+without, and 3.8 s for DeepSeek (API latency); answering about 5 s per question. One trial is therefore roughly
+2 h (Qwen, evolution on), 1.3 h (Qwen, off) and 2.3 h (DeepSeek).
+
+`PARALLEL` runs that many trials at once. Each evaluation process also puts its embedding and BERTScore models on
+the GPU (about 1.8 GB); with the vLLM server (`GPU_UTIL=0.55`) three processes peaked at 15.7 of 16 GB, so use
+**`PARALLEL=2`** on a 16 GB card while vLLM runs, and run DeepSeek after the Qwen steps (or stop vLLM first).
+Memories are cached in `cached_memories_robust/` per backend, model, evolution setting, seed and run tag, so the
+k-sweep and later steps reuse them.
+
+On the DeepSeek API, `deepseek-chat` is an alias: responses report `deepseek-flash`. Each results file records the
+served model in `settings.served_models`.
 
 A single run, for reference:
 
