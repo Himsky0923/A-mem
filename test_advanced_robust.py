@@ -7,7 +7,7 @@ Usage:
     python test_advanced_robust.py --backend ollama --model qwen2.5:3b --dataset data/locomo10.json
 """
 
-from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, EVOLUTION, set_usage_phase
+from memory_layer_robust import RobustLLMController, RobustAgenticMemorySystem, USAGE, EVOLUTION, SERVED_MODELS, set_usage_phase
 from memory_layer import FAILURES, valid_link, cache_is_current, mark_cache
 from llm_text_parsers import (
     PARSE_FALLBACKS,
@@ -323,6 +323,7 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
     FAILURES.clear()
     PARSE_FALLBACKS.clear()
     USAGE.clear()
+    SERVED_MODELS.clear()
     # wall-clock seconds per phase; construction only counts memories built in this run (not loaded from cache)
     phase_seconds = {"construction": 0.0, "qa": 0.0}
 
@@ -507,6 +508,8 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
         "refresh_index": refresh_index, "memory_scope": memory_scope, "run_tag": run_tag,
         "evolution": evolution,
         "num_ctx": num_ctx if backend == "ollama" else None,
+        # what the server says answered (requests in this run): an API alias can map to another model
+        "served_models": dict(SERVED_MODELS),
     }
     main_c5, other_c5_name = ("legacy", "not_mentioned") if legacy_c5_reference else ("not_mentioned", "legacy")
     aggregate_by_c5 = {main_c5: aggregate_results,

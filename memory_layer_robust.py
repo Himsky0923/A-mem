@@ -65,6 +65,16 @@ def count_attempt():
     _usage()["attempts"] += 1
 
 
+# Model names the servers report in their responses, with counts. A requested name can be an alias: on the DeepSeek
+# API, 'deepseek-chat' is answered by 'deepseek-flash'.
+SERVED_MODELS = Counter()
+
+
+def record_served_model(name):
+    if name:
+        SERVED_MODELS[str(name)] += 1
+
+
 def record_usage(prompt_tokens, completion_tokens):
     """Token counts of one successful request; None when the backend did not report them."""
     u = _usage()
@@ -165,6 +175,7 @@ class RobustOpenAIController(RobustBaseLLMController):
         )
         usage = getattr(response, "usage", None)
         record_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+        record_served_model(getattr(response, "model", None))
         return response.choices[0].message.content
 
 
@@ -195,6 +206,7 @@ class RobustOllamaController(RobustBaseLLMController):
                      **({"num_ctx": self.num_ctx} if self.num_ctx else {})},
         )
         record_usage(response.get("prompt_eval_count"), response.get("eval_count"))
+        record_served_model(response.get("model"))
         return response["message"]["content"]
 
 
@@ -268,6 +280,7 @@ class RobustVLLMController(RobustBaseLLMController):
             result = response.json()
             usage = result.get("usage") or {}
             record_usage(usage.get("prompt_tokens"), usage.get("completion_tokens"))
+            record_served_model(result.get("model"))
             return result["choices"][0]["message"]["content"]
         raise RuntimeError(f"vLLM server returned status {response.status_code}: {response.text}")
 
@@ -302,6 +315,7 @@ class RobustLiteLLMController(RobustBaseLLMController):
         response = self._completion(**completion_args)
         usage = getattr(response, "usage", None)
         record_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+        record_served_model(getattr(response, "model", None))
         return response.choices[0].message.content
 
 
