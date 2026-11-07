@@ -22,19 +22,35 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
 | Evaluation script | Paper numbers: original strict-JSON pipeline (`test_advanced.py`) | `test_advanced_robust.py`, which the README now recommends (plain-text prompts, section parsing, evolution split into 3 calls) | Prompts differ from the paper's runs, so some gap is expected |
 | Data | Full LoCoMo (10 conversations, 1,986 questions) | `--ratio 0.3`: first 3 conversations, 497 questions (one optional full run) | Subset; per-category counts are smaller |
 | Trials | One run per setting | 3 seeds per condition, mean ± std | – |
-| vLLM | 0.8.5, `--enforce-eager`, `--gpu-memory-utilization 0.95` | 0.33.0, CUDA graphs on, 0.55, PyTorch sampler (`VLLM_USE_FLASHINFER_SAMPLER=0`) | None intended: speed and VRAM only. Same `--dtype float16 --max-model-len 8192` |
-| k | Tuned per category (Appendix Table 8; Qwen 10/10/50/10/10) | One k from a sweep (10-50) on the same data; per-category k optional | k chosen on the evaluation data, as the authors' `run_k_sweep.sh` also does |
+| Model server and context window | **Paper** (Sec. 4.2): Ollama; window not stated. The released code (Feb 2025) sets none, so Ollama's default applied: 2,048 tokens before v0.6.7 (Apr 2025), longer prompts silently cut from the start. **Repository (2026):** vLLM, `--max-model-len` 4,096 (`run_all_experiments.sh`) or 8,192 (`run_k_sweep.sh`, README) | vLLM, 8,192 | The largest of the authors' settings. Longer prompts are rejected instead of silently cut, scored 0 and counted (`answer_context_overflow`). The paper's Qwen runs may have answered from shortened prompts without any sign of it |
+| vLLM version and flags | 0.8.5, `--enforce-eager`, `--gpu-memory-utilization 0.95`, Turing (sm_75) GPUs | 0.33.0, CUDA graphs on, 0.55, PyTorch sampler (`VLLM_USE_FLASHINFER_SAMPLER=0`), RTX 4080 Super 16 GB | None intended: speed and VRAM only. Same `--dtype float16` |
+| k | Tuned per category (Appendix Table 8; Qwen 10/10/50/10/10) | k = 10 for all categories, from a sweep (10-50) on the same data; per-category k optional | k chosen on the evaluation data, as the authors' `run_k_sweep.sh` also does |
 | GPT-4o-mini | OpenAI API | DeepSeek `deepseek-chat` | Different model |
 
 ## Hidden assumptions and findings
 
-1. **Context overflows are not reported.** The paper never mentions a context limit, truncation or failed
-   answers. The authors' own later commit (b4890dc, 20 Oct 2026) says: *"The robust answer path scored a failed
-   call as an empty prediction without saying so. A prompt longer than a small server's context window (e.g. vLLM
-   --max-model-len 8192 with k=10 plus linked neighbours) fails this way."* The answer prompt holds the k retrieved
-   notes plus up to k linked notes each, about 100-120 tokens per note. With k = 50 (the paper's open-domain k for
-   Qwen) it cannot fit in 8,192 tokens. We keep the authors' 8,192 and count overflows per run
-   (`llm_failures.answer_context_overflow`, `answer_error` per question).
+1. **The context window is undocumented, and overflows were not reported.** The paper never states a context
+   limit. Its Qwen results came from Ollama (Sec. 4.2), which before v0.6.7 used 2,048 tokens and silently dropped
+   the start of longer prompts. The repository's later vLLM scripts use 4,096 or 8,192, and the authors' commit
+   b4890dc (20 Oct 2026) admits: *"The robust answer path scored a failed call as an empty prediction without
+   saying so. A prompt longer than a small server's context window (e.g. vLLM --max-model-len 8192 with k=10 plus
+   linked neighbours) fails this way."* We use 8,192, the most generous documented setting, and count every
+   overflow (`llm_failures.answer_context_overflow`, `answer_error` per question). The answer prompt holds the k
+   retrieved notes plus their linked notes, about 100-120 tokens per note. In our k-sweep (Qwen, evolution on,
+   seed 1, 497 questions):
+
+   | k | 10 | 20 | 30 | 40 | 50 |
+   |---|---|---|---|---|---|
+   | Questions overflowed | 0 | 2 (0.4%) | 198 (40%) | 442 (89%) | 497 (100%) |
+   | Longest answer prompt (tokens) | 5,158 | 8,038 | 8,188 | 8,172 | – |
+   | Overall F1 (paper's c5 scoring) | 30.36 | 32.97 | 22.13 | 3.55 | 0.00 |
+
+   The paper's open-domain k = 50 for Qwen therefore cannot fit even in 8,192 tokens.
+   **Small-model baselines.** Table 1 also reports LoCoMo, ReadAgent, MemoryBank and MemGPT on the small models.
+   LoCoMo and MemGPT use about 17,000 tokens per question, far beyond a 2,048-token Ollama window, while A-Mem uses
+   about 1,100-1,400. If the baselines ran under the same Ollama default, they lost most of their prompt and A-Mem's
+   lead on small models would be inflated. The paper does not say how the baselines were run and the repository
+   contains no baseline code, so this cannot be checked; we reproduce only A-Mem's own numbers.
    Version detail: vLLM 0.33 rejects only prompts over 8,192 tokens and shortens the completion when prompt +
    `max_tokens` (1000) exceeds the window. Older versions such as the authors' 0.8.5 may have rejected those too
    (not verified).
@@ -76,6 +92,15 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
     models do not face the same limit.
 13. **Category-5 scoring flips the adversarial result.** In the smoke test Qwen answered "Not mentioned in the
     conversation" to both adversarial questions: F1 0 under the paper's scoring, 100 under the corrected one.
+14. **Qwen's evolution writes the prompt's placeholders into memory.** `UPDATE_NEIGHBORS_PROMPT` shows its
+    output format with the example values `CONTEXT: updated context sentence` and `TAGS: tag1, tag2, tag3`.
+    Qwen2.5-3B often copies them literally, and the parser accepts them, so real notes are overwritten. After
+    building the three conversations (evolution on, seed 1), 131 of 419, 121 of 369 and 252 of 663 notes have the
+    placeholder context or only placeholder tags: 504 of 1,451 (about 35%). Notes that mix placeholder and real tags
+    are not counted. Example: *"I went to a LGBTQ support group yesterday ..."* has context "updated context
+    sentence". It is not caused by the context window: all construction requests finished normally (no `length`
+    stops) and almost all prompts were under 2,000 tokens. Left unchanged, as fixing it would change the method;
+    it bears directly on the evolution ablation, which the paper ran only on GPT-4o-mini.
 
 ## Debug diary
 
@@ -96,7 +121,10 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
 
 To be filled from `results/summary.md` after the runs (`bash scripts/run_experiments.sh aggregate`).
 
-- Chosen k (sweep):
+- Chosen k (sweep): **k = 10** (table in finding 1). k = 20 scored 2.6 F1 points higher on one seed, but its
+  longest answer prompt was 154 tokens below the limit, and without evolution prompts are longer (smoke test:
+  4,376 vs 2,859 tokens), so the no-evolution condition would overflow more and the comparison would partly
+  measure overflows. k = 10 has no overflows, leaves room, and is the paper's k for 4 of the 5 categories.
 - Qwen2.5-3B, evolution on vs off, vs paper Table 1:
 - DeepSeek, evolution on vs off, vs paper Table 1 / Table 3 (GPT-4o-mini):
 - Context overflows per condition:
