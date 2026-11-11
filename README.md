@@ -18,7 +18,7 @@ paper's GPT-4o-mini, whose Table 3 has the authors' own "w/o memory evolution" a
 3 seeds and reported as mean ± std. Everything uses `test_advanced_robust.py`, the evaluation the upstream README
 recommends; `test_advanced.py` is unchanged.
 
-Findings, deviations from the authors' setup and the debug diary are in
+Results, findings, deviations from the authors' setup and the debug diary are in
 [REPRODUCTION_NOTES.md](REPRODUCTION_NOTES.md).
 
 ### Setup (Linux or WSL2 Ubuntu, NVIDIA GPU with ≥ 12 GB)
@@ -43,26 +43,32 @@ cp .env.example .env    # then put your key in OPENAI_API_KEY
 The first vLLM start downloads Qwen2.5-3B-Instruct from Hugging Face (about 6 GB).
 
 Ollama also works as a backend (`ollama pull qwen2.5:3b-instruct-fp16`, then `--backend ollama --model
-qwen2.5:3b-instruct-fp16 --num_ctx 8192`), but the results here use vLLM as the authors did.
+qwen2.5:3b-instruct-fp16 --num_ctx 8192`), but the results here use vLLM, as the authors' repository scripts do
+(the paper itself ran its local models through Ollama and does not state a context window).
 
 ### Running the experiments
 
 ```bash
-# terminal 1: the model server (authors' settings: fp16, --max-model-len 8192)
+# terminal 1: the model server (the repository's settings: fp16, --max-model-len 8192)
 bash scripts/start_vllm.sh
 
-# terminal 2, from the repository root, one step at a time
-bash scripts/run_experiments.sh ksweep          # Qwen, evolution on, seed 1, k = 10..50 -> choose K
-K=10 bash scripts/run_experiments.sh qwen       # Qwen: evolution on / off x seeds 1 2 3
-K=10 bash scripts/run_experiments.sh deepseek   # DeepSeek: the same six runs (no GPU server needed)
-K=10 bash scripts/run_experiments.sh full       # optional: Qwen baseline on the whole dataset
-bash scripts/run_experiments.sh aggregate       # results/summary.md + CSVs
+# terminal 2, from the repository root, one step at a time (the commands used for the results)
+PARALLEL=2 bash scripts/run_experiments.sh ksweep          # Qwen, evolution on, seed 1, k = 10..50 -> choose K
+PARALLEL=2 K=10 bash scripts/run_experiments.sh qwen       # Qwen: evolution on / off x seeds 1 2 3
+# stop the vLLM server (Ctrl+C in terminal 1) to free the GPU, then:
+PARALLEL=3 K=10 bash scripts/run_experiments.sh deepseek   # DeepSeek: the same six runs
+bash scripts/run_experiments.sh aggregate                  # results/summary.md + CSVs
+
+# optional, not run for the results here: Qwen baseline on the whole dataset (needs vLLM)
+K=10 bash scripts/run_experiments.sh full
 ```
 
-Runs use `--ratio 0.3`: the first 3 of the 10 LoCoMo conversations (1,451 turns, 497 questions). Measured on the
-GPU above with three runs at once: building memories takes about 3.3 s per turn for Qwen with evolution, 1.7 s
-without, and 3.8 s for DeepSeek (API latency); answering about 5 s per question. One trial is therefore roughly
-2 h (Qwen, evolution on), 1.3 h (Qwen, off) and 2.3 h (DeepSeek).
+Runs use `--ratio 0.3`: the first 3 of the 10 LoCoMo conversations (1,451 turns, 497 questions). Measured in the
+main runs on the GPU above (Qwen two at a time, DeepSeek three at a time): building memories took about 3.0 s per
+turn for Qwen with evolution, 1.7 s without, and 4.4 to 5.5 s for DeepSeek (API latency, which varied during the
+day); answering took about 5 s per question for Qwen and 6 to 7 s for DeepSeek. One trial took about 1.9 h (Qwen,
+evolution on), 1.4 h (Qwen, off) and 3 to 3.3 h (DeepSeek); the whole study (k-sweep, 6 Qwen and 6 DeepSeek runs)
+about 13 h.
 
 `PARALLEL` runs that many trials at once. Each evaluation process also puts its embedding and BERTScore models on
 the GPU (about 1.8 GB); with the vLLM server (`GPU_UTIL=0.55`) three processes peaked at 15.7 of 16 GB, so use
@@ -86,7 +92,8 @@ A single run, for reference:
 
 ### Aggregating
 
-`python scripts/aggregate.py results/main/*.json --out results/summary` groups the result files by model ×
+`~/venvs/amem/bin/python scripts/aggregate.py results/main/*.json --out results/summary` (what the `aggregate`
+step runs) groups the result files by model ×
 evolution on/off × k × ratio and writes `results/summary.md` and CSVs: F1 and BLEU-1 (%) per category and overall as
 mean ± std over the trials, once with category 5 scored as in the paper and once corrected, the paper's numbers
 for comparison, and cost and reliability (LLM calls, tokens, minutes, failed answers and context overflows, parse
