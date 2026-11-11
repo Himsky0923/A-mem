@@ -1,6 +1,6 @@
 # Reproduction notes: A-Mem on LoCoMo
 
-Working notes for the reproduction of *A-Mem: Agentic Memory for LLM Agents* (arXiv 2502.12110, latest version)
+Results and notes of the reproduction of *A-Mem: Agentic Memory for LLM Agents* (arXiv 2502.12110, latest version)
 with the authors' repository. Setup and commands are in the [README](README.md#reproduction-study-a-mem-on-locomo-with-and-without-memory-evolution).
 
 ## Target and modification
@@ -30,7 +30,8 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
 ## Hidden assumptions and findings
 
 1. **The context window is undocumented, and overflows were not reported.** The paper never states a context
-   limit. Its Qwen results came from Ollama (Sec. 4.2), which before v0.6.7 used 2,048 tokens and silently dropped
+   limit: the full text of v11, appendices included, mentions no context length, token limit or `num_ctx`, and the
+   `OllamaController` in the code released with it (Feb 2025) passes no context option. Its Qwen results came from Ollama (Sec. 4.2), which before v0.6.7 used 2,048 tokens and silently dropped
    the start of longer prompts. The repository's later vLLM scripts use 4,096 or 8,192, and the authors' commit
    b4890dc (20 Oct 2026) admits: *"The robust answer path scored a failed call as an empty prediction without
    saying so. A prompt longer than a small server's context window (e.g. vLLM --max-model-len 8192 with k=10 plus
@@ -116,16 +117,67 @@ with the authors' repository. Setup and commands are in the [README](README.md#r
 | First vLLM start took ~16 min | Model download (5.8 GB) | Cached afterwards (model loads in seconds) |
 | Not enough VRAM for 3 parallel runs + vLLM | Each evaluation process loads MiniLM and BERTScore's RoBERTa-large on the GPU (~1.8 GB); peak 15.7 / 16 GB | `PARALLEL=2` while vLLM runs |
 | Shell commands fail on `\r` | CRLF line endings on a Windows checkout | `.gitattributes` keeps `*.sh` LF; README strips `\r` from `requirements.txt` |
+| DeepSeek HTTP 500 / 503 and empty replies during the main runs | Server load (memory building slowed to ~11.6 s per turn for an hour) | Built-in retries (3 attempts); 0-4 calls per run gave up and were counted in `llm_failures`; no answer failed |
 
 ## Results
 
-To be filled from `results/summary.md` after the runs (`bash scripts/run_experiments.sh aggregate`).
+12 main runs (2 models × evolution on/off × seeds 1, 2, 3), k = 10, first 3 conversations (497 questions); tables
+from `results/summary.md` (`bash scripts/run_experiments.sh aggregate`). F1 in %, mean ± sample std over seeds.
+Every run answered all 497 questions: 0 failed answers and 0 context overflows in all 12 runs.
 
-- Chosen k (sweep): **k = 10** (table in finding 1). k = 20 scored 2.6 F1 points higher on one seed, but its
-  longest answer prompt was 154 tokens below the limit, and without evolution prompts are longer (smoke test:
-  4,376 vs 2,859 tokens), so the no-evolution condition would overflow more and the comparison would partly
-  measure overflows. k = 10 has no overflows, leaves room, and is the paper's k for 4 of the 5 categories.
-- Qwen2.5-3B, evolution on vs off, vs paper Table 1:
-- DeepSeek, evolution on vs off, vs paper Table 1 / Table 3 (GPT-4o-mini):
-- Context overflows per condition:
-- Cost (LLM calls, tokens, time) per condition:
+**Chosen k: 10** (sweep table in finding 1). k = 20 scored 2.6 F1 higher on one seed, but its longest answer prompt
+was 154 tokens below the limit, and prompts without evolution are longer (main runs: 6,942 vs 5,305 tokens at
+k = 10), so the no-evolution condition would overflow more and the comparison would partly measure overflows.
+
+### Qwen2.5-3B, evolution on, vs paper Table 1
+
+| Category | Ours F1 | Paper F1 | Ours BLEU-1 | Paper BLEU-1 |
+|---|---|---|---|---|
+| Multi-hop | 23.79 ± 3.03 | 12.57 | 14.99 ± 3.22 | 9.01 |
+| Temporal | 25.20 ± 2.42 | 27.59 | 18.93 ± 1.72 | 25.07 |
+| Open-domain | 9.85 ± 3.06 | 7.12 | 7.41 ± 2.09 | 7.28 |
+| Single-hop | 32.55 ± 0.21 | 17.23 | 27.87 ± 0.21 | 13.12 |
+| Adversarial | 40.71 ± 2.26 | 27.91 | 38.47 ± 2.30 | 25.15 |
+
+Same order of magnitude, not the same numbers: higher in 4 of 5 categories, by more than the seed spread.
+
+### Evolution on vs off (the modification)
+
+| Model | Evolution | Multi-hop | Temporal | Open-domain | Single-hop | Adversarial | Overall | Overall (corrected c5) |
+|---|---|---|---|---|---|---|---|---|
+| Qwen2.5-3B | on | 23.79 ± 3.03 | 25.20 ± 2.42 | 9.85 ± 3.06 | 32.55 ± 0.21 | 40.71 ± 2.26 | 30.79 ± 0.34 | 35.96 ± 1.32 |
+| Qwen2.5-3B | off | 19.86 ± 0.53 | 25.83 ± 2.62 | 8.63 ± 2.58 | 32.24 ± 0.78 | 36.96 ± 2.10 | 29.31 ± 1.01 | 36.25 ± 0.41 |
+| DeepSeek | on | 35.37 ± 2.09 | 30.19 ± 4.50 | 10.13 ± 4.03 | 46.23 ± 1.20 | 26.84 ± 4.62 | 35.81 ± 2.30 | 47.21 ± 0.51 |
+| DeepSeek | off | 32.28 ± 3.19 | 29.86 ± 2.08 | 11.61 ± 0.84 | 45.16 ± 2.08 | 27.94 ± 6.24 | 35.17 ± 2.58 | 45.97 ± 0.88 |
+| Paper, GPT-4o-mini (Table 3) | on | 27.02 | 45.85 | 12.14 | 44.65 | 50.03 | – | – |
+| Paper, GPT-4o-mini (Table 3) | off | 21.35 | 31.24 | 10.13 | 39.17 | 44.16 | – | – |
+
+- Disabling evolution changes overall F1 by +1.5 (Qwen) and +0.6 (DeepSeek) with the paper's scoring, −0.3 and +1.2
+  corrected. No difference is significant (Welch's t-test, n = 3 per condition, all p > 0.1).
+- The paper's temporal gain from evolution (+14.6 F1 for GPT-4o-mini) does not appear (−0.6 and +0.3). With a seed
+  spread of 2-4.5 F1, an effect that size would be clear; effects of 1-4 points cannot be excluded with 3 seeds.
+- Multi-hop is higher with evolution in all 6 seed pairs (Qwen +1.3, +6.4, +4.1; DeepSeek +2.8, +4.5, +2.0; sign
+  test p ≈ 0.03). Exploratory, as many categories were tested.
+- Under the corrected category-5 scoring, evolution's adversarial effect for Qwen reverses (63.6 on vs 67.8 off).
+- DeepSeek against the paper's GPT-4o-mini: higher on multi-hop (35.4 vs 27.0), similar on single-hop, lower on
+  temporal (30.2 vs 45.9). Its low adversarial score under the paper's scoring comes from answering "Not mentioned in
+  the conversation"; corrected, it scores 77.4.
+
+### Cost of evolution (mean per run)
+
+| Model | Evolution | Build LLM calls | Build tokens | Build min | QA tokens | Longest answer prompt | Neighbour notes rewritten |
+|---|---|---|---|---|---|---|---|
+| Qwen2.5-3B | on | 4,284 | 3.10 M | 73 | 1.41 M | 5,305 | 3,900 |
+| Qwen2.5-3B | off | 3,421 | 2.23 M | 42 | 1.43 M | 6,942 | 0 |
+| DeepSeek | on | 4,440 | 3.88 M | 134 | 5.14 M | 16,307 | 544 |
+| DeepSeek | off | 4,328 | 3.41 M | 107 | 4.01 M | 11,215 | 0 |
+
+For Qwen, evolution adds 75% build time and 39% build tokens. DeepSeek rarely chooses to rewrite neighbours, and
+its answer prompts are far longer than Qwen's window would allow. DeepSeek times depend on API load.
+
+### Run notes
+
+- Qwen's seed-1 evolution run reused the memory built in the k-sweep (same settings, seed and run tag); only its
+  answers were regenerated, so its build cost is the mean of seeds 2 and 3.
+- DeepSeek requests for `deepseek-chat` were all served by `deepseek-flash` (`settings.served_models`).
+- Results, caches and logs are gitignored; the commands in the README regenerate them.
